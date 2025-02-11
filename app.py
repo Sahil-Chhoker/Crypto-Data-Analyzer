@@ -9,8 +9,58 @@ from docx import Document
 from docx.shared import Inches
 import matplotlib.pyplot as plt
 import seaborn as sns
+from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import os
 
 app = Flask(__name__)
+
+class GoogleDriveUploader:
+    def __init__(self, credentials_path):
+        self.SCOPES = ['https://www.googleapis.com/auth/drive.file']
+        self.credentials = service_account.Credentials.from_service_account_file(
+            credentials_path, scopes=self.SCOPES
+        )
+        self.service = build('drive', 'v3', credentials=self.credentials)
+        self.file_ids = {'excel': None, 'report': None}
+        self.share_links = {'excel': None, 'report': None}
+
+    def upload_file(self, file_path, file_type):
+        file_metadata = {'name': os.path.basename(file_path)}
+        media = MediaFileUpload(file_path, resumable=True)
+        
+        try:
+            # If file already exists, update it
+            if self.file_ids[file_type]:
+                file = self.service.files().update(
+                    fileId=self.file_ids[file_type],
+                    body=file_metadata,
+                    media_body=media
+                ).execute()
+            else:
+                # Create new file
+                file = self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id'
+                ).execute()
+                self.file_ids[file_type] = file.get('id')
+                
+                # Set sharing permissions
+                self.service.permissions().create(
+                    fileId=self.file_ids[file_type],
+                    body={'type': 'anyone', 'role': 'reader'},
+                ).execute()
+            
+            # Get sharing link
+            self.share_links[file_type] = f"https://drive.google.com/uc?export=download&id={self.file_ids[file_type]}"
+            return True
+            
+        except Exception as e:
+            print(f"Error uploading to Google Drive: {e}")
+            return False
 
 class CryptoWebTracker:
     def __init__(self, update_interval=300):
@@ -27,14 +77,19 @@ class CryptoWebTracker:
         # Output files
         self.excel_file = "crypto_data.xlsx"
         self.report_file = "market_report.docx"
+        self.drive_uploader = GoogleDriveUploader('credentials.json')
         
         # Web data storage
         self.latest_data = {
             'data': None,
             'stats': None,
-            'last_updated': None
+            'last_updated': None,
+            'download_links': {
+                'excel': None,
+                'report': None
+            }
         }
-        
+
         self.running = True
 
     def get_coin_names(self):
@@ -149,55 +204,66 @@ class CryptoWebTracker:
         return stats
 
     def make_report(self, df, stats):
-        doc = Document()
-        
-        # Title
-        doc.add_heading('Crypto Market Report', 0)
-        doc.add_paragraph(f"Generated: {stats['timestamp']}")
-        
-        # Market overview section
-        doc.add_heading('Market Overview', 1)
-        overview = stats['market_overview']
-        doc.add_paragraph(f"Total Market Cap: ${overview['total_market_cap']:,.2f}")
-        doc.add_paragraph(f"24h Volume: ${overview['total_volume_24h']:,.2f}")
-        
-        # Top coins section with more details
-        doc.add_heading('Top 5 Cryptocurrencies by Market Cap', 1)
-        for coin in stats['detailed_analysis']['top_5_by_market_cap']:
-            p = doc.add_paragraph(style='List Bullet')
-            p.add_run(f"{coin['Name']} ({coin['Symbol']})\n").bold = True
-            p.add_run(f"Market Cap: ${coin['Market Cap']:,.2f}\n")
-            p.add_run(f"Price: ${coin['Price']:,.2f}")
-        
-        # Price Statistics
-        doc.add_heading('Price Statistics', 1)
-        price_stats = stats['detailed_analysis']['price_statistics']
-        doc.add_paragraph(f"Average Price: ${price_stats['average_price']:,.2f}")
-        doc.add_paragraph(f"Median Price: ${price_stats['median_price']:,.2f}")
-        doc.add_paragraph(f"Highest Price: ${price_stats['highest_price']:,.2f}")
-        doc.add_paragraph(f"Lowest Price: ${price_stats['lowest_price']:,.2f}")
-        
-        # 24h Price Changes
-        doc.add_heading('24-Hour Price Changes', 1)
-        changes = stats['detailed_analysis']['price_changes']
-        best = changes['highest_24h_change']
-        worst = changes['lowest_24h_change']
-        
-        doc.add_paragraph(f"Highest Gainer: {best['Name']} ({best['Symbol']}) with {best['Change (24h)']:+.2f}%")
-        doc.add_paragraph(f"Biggest Decliner: {worst['Name']} ({worst['Symbol']}) with {worst['Change (24h)']:+.2f}%")
-        doc.add_paragraph(f"Average 24h Change: {changes['average_24h_change']:+.2f}%")
-        
-        # Market health section
-        doc.add_heading('Market Health', 1)
-        health = stats['market_health']
-        doc.add_paragraph(f"Coins Up: {health['positive_performers']}")
-        doc.add_paragraph(f"Coins Down: {health['negative_performers']}")
-        
-        # Add a price change chart
-        self.make_chart(df)
-        doc.add_picture('price_changes.png', width=Inches(6))
-        
-        doc.save(self.report_file)
+        try:
+            doc = Document()
+            
+            # Title
+            doc.add_heading('Crypto Market Report', 0)
+            doc.add_paragraph(f"Generated: {stats['timestamp']}")
+            
+            # Market overview section
+            doc.add_heading('Market Overview', 1)
+            overview = stats['market_overview']
+            doc.add_paragraph(f"Total Market Cap: ${overview['total_market_cap']:,.2f}")
+            doc.add_paragraph(f"24h Volume: ${overview['total_volume_24h']:,.2f}")
+            
+            # Top coins section with more details
+            doc.add_heading('Top 5 Cryptocurrencies by Market Cap', 1)
+            for coin in stats['detailed_analysis']['top_5_by_market_cap']:
+                p = doc.add_paragraph(style='List Bullet')
+                p.add_run(f"{coin['Name']} ({coin['Symbol']})\n").bold = True
+                p.add_run(f"Market Cap: ${coin['Market Cap']:,.2f}\n")
+                p.add_run(f"Price: ${coin['Price']:,.2f}")
+            
+            # Price Statistics
+            doc.add_heading('Price Statistics', 1)
+            price_stats = stats['detailed_analysis']['price_statistics']
+            doc.add_paragraph(f"Average Price: ${price_stats['average_price']:,.2f}")
+            doc.add_paragraph(f"Median Price: ${price_stats['median_price']:,.2f}")
+            doc.add_paragraph(f"Highest Price: ${price_stats['highest_price']:,.2f}")
+            doc.add_paragraph(f"Lowest Price: ${price_stats['lowest_price']:,.2f}")
+            
+            # 24h Price Changes
+            doc.add_heading('24-Hour Price Changes', 1)
+            changes = stats['detailed_analysis']['price_changes']
+            best = changes['highest_24h_change']
+            worst = changes['lowest_24h_change']
+            
+            doc.add_paragraph(f"Highest Gainer: {best['Name']} ({best['Symbol']}) with {best['Change (24h)']:+.2f}%")
+            doc.add_paragraph(f"Biggest Decliner: {worst['Name']} ({worst['Symbol']}) with {worst['Change (24h)']:+.2f}%")
+            doc.add_paragraph(f"Average 24h Change: {changes['average_24h_change']:+.2f}%")
+            
+            # Market health section
+            doc.add_heading('Market Health', 1)
+            health = stats['market_health']
+            doc.add_paragraph(f"Coins Up: {health['positive_performers']}")
+            doc.add_paragraph(f"Coins Down: {health['negative_performers']}")
+            
+            # Add a price change chart
+            self.make_chart(df)
+            doc.add_picture('price_changes.png', width=Inches(6))
+            
+            doc.save(self.report_file)
+
+            # Upload to Google Drive
+            if self.drive_uploader.upload_file(self.report_file, 'report'):
+                self.latest_data['download_links']['report'] = self.drive_uploader.share_links['report']
+                print(f"Report uploaded to Drive: {self.latest_data['download_links']['report']}")
+            else:
+                print("Failed to upload report to Drive")
+        except Exception as e:
+            print(f"Error in make_report: {e}")
+
 
     def update_excel(self, df, stats):
         with pd.ExcelWriter(self.excel_file, engine='openpyxl') as writer:
@@ -225,6 +291,10 @@ class CryptoWebTracker:
             # Make it look nice
             self._format_excel(writer)
 
+        # Upload to Google Drive
+        if self.drive_uploader.upload_file(self.excel_file, 'excel'):
+            self.latest_data['download_links']['excel'] = self.drive_uploader.share_links['excel']
+
     # Add some color to the Excel sheets
     def _format_excel(self, writer):
         for sheet in ['Market Data', 'Analysis']:
@@ -251,12 +321,16 @@ class CryptoWebTracker:
                 # Update files
                 self.update_excel(df, stats)
                 
+                # Preserve existing download links while updating other data
+                current_links = self.latest_data['download_links']
+                
                 # Update web data
-                self.latest_data = {
+                self.latest_data.update({
                     'data': df.to_dict('records'),
                     'stats': stats,
-                    'last_updated': stats['timestamp']
-                }
+                    'last_updated': stats['timestamp'],
+                    'download_links': current_links  # Preserve the links
+                })
                 
                 # Make report on the hour
                 current_hour = datetime.now().hour
@@ -267,6 +341,8 @@ class CryptoWebTracker:
                 
                 print(f"Done! Tracking {len(df)} coins")
                 print(f"Total market cap: ${stats['market_overview']['total_market_cap']:,.2f}")
+                print(f"Excel link: {self.latest_data['download_links']['excel']}")
+                print(f"Report link: {self.latest_data['download_links']['report']}")
                 
             except Exception as e:
                 print(f"Something went wrong: {e}")
@@ -481,8 +557,8 @@ HTML_TEMPLATE = '''
         <div class="refresh-info">
             <span>Next refresh in: <span id="countdown">300</span> seconds</span>
             <button class="refresh-button" onclick="refreshNow()">Refresh Now</button>
-            <a href="/crypto_data.xlsx" class="refresh-button">Download Excel</a>
-            <a href="/market_report.docx" class="refresh-button">Download Report</a>
+            <a href="{{ excel_link }}" class="refresh-button">Download Excel</a>
+            <a href="{{ report_link }}" class="refresh-button">Download Report</a>
         </div>
 
         <div class="summary">
@@ -552,13 +628,16 @@ def home():
     if tracker.latest_data['data'] is None:
         return "Loading data... Please refresh in a moment."
     
+    excel_link = tracker.latest_data['download_links']['excel']
+    report_link = tracker.latest_data['download_links']['report']
+       
     return render_template_string(
         HTML_TEMPLATE,
         data=tracker.latest_data['data'],
         stats=tracker.latest_data['stats'],
         last_updated=tracker.latest_data['last_updated'],
-        excel_path=tracker.excel_file,
-        report_path=tracker.report_file
+        excel_link=excel_link if excel_link else '#',
+        report_link=report_link if report_link else '#'
     )
 
 def start_app():
